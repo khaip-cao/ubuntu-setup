@@ -1,92 +1,121 @@
 #!/bin/bash
 
-# Exit on error
-set -e
+# Features: Arch detection, Retries, and Verification
 
-echo "🚀 Starting Full Ubuntu Server Environment Setup..."
+# 1. Utility Functions
+log() { echo -e "\033[1;32m🚀 $1\033[0m"; }
+error() { echo -e "\033[1;31m❌ $1\033[0m"; }
 
-# 1. Update System & Install Core Utilities
-echo "📦 Updating system and installing build essentials..."
-sudo apt update && sudo apt upgrade -y
+retry() {
+    local n=1
+    local max=3
+    local delay=5
+    while true; do
+        "$@" && break || {
+            if [[ $n -lt $max ]]; then
+                ((n++))
+                error "Command failed. Attempt $n/$max in ${delay}s..."
+                sleep $delay;
+            else
+                error "The command has failed after $n attempts."
+                return 1
+            fi
+        }
+    done
+}
+
+# Detect Architecture
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ]; then
+    GO_ARCH="amd64"
+elif [ "$ARCH" = "aarch64" ]; then
+    GO_ARCH="arm64"
+else
+    error "Unsupported architecture: $ARCH"
+    exit 1
+fi
+
+log "Starting setup for $ARCH architecture..."
+
+# 2. System Update
+log "Updating system packages..."
+retry sudo apt update && sudo apt upgrade -y
 sudo apt install -y curl git build-essential libssl-dev zlib1g-dev \
-libbz2-dev libreadline-dev libsqlite3-dev wget llvm libncurses5-dev \
-libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev \
+libbz2-dev libreadline-dev libsqlite3-dev wget llvm libncurses-dev \
+xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev \
 liblzma-dev make jq htop tmux ncdu net-tools
 
-# 2. Install Docker & Docker Compose
-echo "🐳 Installing Docker..."
-sudo apt install -y docker.io docker-compose-v2
-
-# Configure Docker Group (to run without sudo)
-echo "🔧 Configuring Docker group..."
-if ! getent group docker > /dev/null; then
-    sudo groupadd docker
-fi
-sudo usermod -aG docker $USER
-echo "✅ Added $USER to docker group."
-
-# 3. Install pyenv (Python Version Manager)
-echo "🐍 Installing pyenv..."
-if [ ! -d "$HOME/.pyenv" ]; then
-    curl https://pyenv.run | bash
-    
-    # Add to .bashrc
-    {
-        echo 'export PYENV_ROOT="$HOME/.pyenv"'
-        echo '[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"'
-        echo 'eval "$(pyenv init -)"'
-        echo 'eval "$(pyenv virtualenv-init -)"'
-    } >> ~/.bashrc
+# 3. Docker (with check)
+if ! command -v docker &> /dev/null; then
+    log "Installing Docker..."
+    sudo apt install -y docker.io docker-compose-v2
+    sudo usermod -aG docker $USER
+else
+    log "Docker already installed."
 fi
 
-# Load pyenv into current session
-export PYENV_ROOT="$HOME/.pyenv"
-export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init -)"
-
-# Install Python LTS and Global Tools
-PYTHON_LTS="3.12.9"
-echo "Installing Python $PYTHON_LTS and tools (uv, ruff)..."
-pyenv install $PYTHON_LTS
-pyenv global $PYTHON_LTS
-pip install --upgrade pip
-pip install uv ruff python-dotenv
-
-# 4. Install nvm (Node Version Manager)
-echo "📦 Installing nvm..."
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-
-# Load nvm into current session
+# 4. NVM Installation (with path verification)
 export NVM_DIR="$HOME/.nvm"
+if [ ! -d "$NVM_DIR" ]; then
+    log "Installing NVM..."
+    retry curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+fi
+
+# Load NVM for the rest of this script
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
-# Install Node LTS and Global Tools
-echo "Installing Node.js LTS and tools (pnpm, pm2)..."
-nvm install --lts
-nvm use --lts
-npm install -g pnpm pm2 nodemon
-
-# 5. Install Go (Golang)
-# Since you're working on Gin/Go projects, let's grab the latest stable
-echo "🐹 Installing Go..."
-GO_VERSION="1.22.1" # Standard stable version for 2024/2025
-wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
-rm go${GO_VERSION}.linux-amd64.tar.gz
-
-# Add Go to .bashrc
-if ! grep -q "/usr/local/go/bin" ~/.bashrc; then
-    echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
+if command -v nvm &> /dev/null; then
+    log "Installing Node LTS..."
+    nvm install --lts
+    npm install -g pnpm pm2
+else
+    error "NVM failed to load."
 fi
 
-echo "--------------------------------------------------------"
-echo "🎉 Setup Complete!"
-echo "--------------------------------------------------------"
-echo "1. Run 'source ~/.bashrc' to refresh your current session."
-echo "2. LOG OUT AND LOG BACK IN to use Docker without sudo."
-echo "3. Verify your stack:"
-echo "   - docker ps"
-echo "   - go version"
-echo "   - python --version (uv, ruff)"
-echo "   - node -v (pnpm, pm2)"
-echo "--------------------------------------------------------"
+# 5. Pyenv Installation
+export PYENV_ROOT="$HOME/.pyenv"
+if [ ! -d "$PYENV_ROOT" ]; then
+    log "Installing pyenv..."
+    retry curl https://pyenv.run | bash
+fi
+
+# Load pyenv for script context
+export PATH="$PYENV_ROOT/bin:$PATH"
+if command -v pyenv &> /dev/null; then
+    eval "$(pyenv init -)"
+    log "Installing Python 3.12.9 (This takes time on ARM)..."
+    # Only install if not present
+    pyenv versions | grep -q "3.12.9" || pyenv install 3.12.9
+    pyenv global 3.12.9
+else
+    error "Pyenv failed to load."
+fi
+
+# 6. Go Installation (Architecture Aware)
+GO_VERSION="1.22.1"
+if [[ "$(go version 2>/dev/null)" != *"$GO_VERSION"* ]]; then
+    log "Installing Go $GO_VERSION for $GO_ARCH..."
+    wget "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+    rm "go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+else
+    log "Go $GO_VERSION already correct."
+fi
+
+# 7. Final .bashrc Cleanup (Avoid Duplicates)
+log "Finalizing .bashrc..."
+declare -a CONFIG_LINES=(
+    'export PYENV_ROOT="$HOME/.pyenv"'
+    '[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"'
+    'eval "$(pyenv init -)"'
+    'export NVM_DIR="$HOME/.nvm"'
+    '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"'
+    'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin'
+)
+
+for line in "${CONFIG_LINES[@]}"; do
+    grep -qF "$line" ~/.bashrc || echo "$line" >> ~/.bashrc
+done
+
+log "Setup Complete! Please run: source ~/.bashrc"
